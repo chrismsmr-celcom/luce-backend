@@ -1,66 +1,114 @@
-
-"""Simple development authentication.
-
-For development/testing only.
-
-The frontend sends:
-    Authorization: Bearer <token>
-
-The backend does NOT decode, verify, or depend on JWT.
-The bearer value is treated as an opaque session identifier.
-
-This keeps the API protected from unauthenticated requests while allowing
-the frontend and backend to run on different domains without JWT setup.
-
-Replace this with proper authentication before production.
-"""
-
-import logging
 import uuid
 
-logger = logging.getLogger("luce.auth")
+import pytest
 
-# Authentication is always enabled in this development implementation.
-ENABLED = True
-
-
-class AuthError(Exception):
-    """Raised when authentication fails."""
+import app as app_module
+import auth
+import database
 
 
-def verify_token(token: str) -> str:
-    """Return a stable Luce user id for an opaque bearer token.
-
-    The token is intentionally NOT decoded or verified.
-
-    During development, the token itself is converted into a deterministic
-    UUID so the same frontend session maps to the same Luce user.
-    """
-
-    token = token.strip()
-
-    if not token:
-        raise AuthError("Empty bearer token")
-
-    # Create a deterministic UUID from the opaque token.
-    # No JWT parsing or cryptographic verification is performed.
-    user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"luce:{token}"))
-
-    return user_id
+def bearer(token):
+    return {"Authorization": f"Bearer {token}"}
 
 
-def user_from_authorization(header: str | None) -> str:
-    """Extract the opaque bearer token and return its Luce user id."""
+@pytest.fixture()
+def supa(client, monkeypatch):
+    """Enable development bearer authentication."""
+    monkeypatch.setattr(auth, "ENABLED", True)
+    app_module._known_users.clear()
+    return client
 
-    if not header:
-        raise AuthError("Missing bearer token")
 
-    if not header.lower().startswith("bearer "):
-        raise AuthError("Invalid authorization header")
+def test_valid_bearer_gives_user(supa):
+    token = "development-session-token"
 
-    token = header[7:].strip()
+    r = supa.get("/api/me", headers=bearer(token))
 
-    if not token:
-        raise AuthError("Empty bearer token")
+    assert r.status_code == 200
+    assert r.get_json()["auth"] == "supabase"
 
-    return verify_token(token)
+    # The same bearer token must always map to the same user.
+    expected_user = auth.verify_token(token)
+
+    assert database.get_autonomy(expected_user) == "ask"
+
+
+def test_missing_token_401(supa):
+    r = supa.get("/api/me")
+
+    assert r.status_code == 401
+
+
+def test_invalid_authorization_header_401(supa):
+    r = supa.get(
+        "/api/me",
+        headers={"Authorization": "Basic something"},
+    )
+
+    assert r.status_code == 401
+
+
+def test_empty_bearer_401(supa):
+    r = supa.get(
+        "/api/me",
+        headers={"Authorization": "Bearer "},
+    )
+
+    assert r.status_code == 401
+
+
+def test_same_token_same_user(supa):
+    token = "my-development-token"
+
+    user1 = auth.verify_token(token)
+    user2 = auth.verify_token(token)
+
+    assert user1 == user2
+
+
+def test_different_tokens_are_isolated(supa):
+    token1 = "user-one-token"
+    token2 = "user-two-token"
+
+    user1 = auth.verify_token(token1)
+    user2 = auth.verify_token(token2)
+
+    assert user1 != user2
+
+    database.create_user(user1)
+    database.create_user(user2)
+
+    aid = database.create_pending_action(
+        user1,
+        "GMAIL_SEND_EMAIL",
+        {},
+    )
+
+    # User 2 must not be able to confirm User 1's action.
+    response = supa.post(
+        f"/api/actions/{aid}/confirm",
+        headers=bearer(token2),
+    )
+
+    assert response.status_code == 404
+
+    # User 1 can see their own pending action.
+    response = supa.get(
+        "/api/actions",
+        headers=bearer(token1),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["pending_actions"][0]["id"] == aid
+
+
+def test_public_endpoints_need_no_token(supa):
+    response = supa.get("/health")
+
+    assert response.status_code == 200
+
+
+def test_user_id_is_valid_uuid():
+    user_id = auth.verify_token("development-token")
+
+    uuid.UUID(user_id)
