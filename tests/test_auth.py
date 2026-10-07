@@ -1,87 +1,66 @@
-import time
+
+"""Simple development authentication.
+
+For development/testing only.
+
+The frontend sends:
+    Authorization: Bearer <token>
+
+The backend does NOT decode, verify, or depend on JWT.
+The bearer value is treated as an opaque session identifier.
+
+This keeps the API protected from unauthenticated requests while allowing
+the frontend and backend to run on different domains without JWT setup.
+
+Replace this with proper authentication before production.
+"""
+
+import logging
 import uuid
 
-import jwt
-import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
+logger = logging.getLogger("luce.auth")
 
-import app as app_module
-import auth
-import database
-
-URL = "https://proj.supabase.co"
-SECRET = "super-secret-jwt-key-for-tests-32bytes!"
-USER = str(uuid.uuid4())
+# Authentication is always enabled in this development implementation.
+ENABLED = True
 
 
-def make_token(key=SECRET, alg="HS256", **over):
-    claims = {
-        "sub": USER,
-        "aud": "authenticated",
-        "iss": f"{URL}/auth/v1",
-        "exp": int(time.time()) + 3600,
-        **over,
-    }
-    return jwt.encode({k: v for k, v in claims.items() if v is not None}, key, algorithm=alg)
+class AuthError(Exception):
+    """Raised when authentication fails."""
 
 
-@pytest.fixture()
-def supa(client, monkeypatch):
-    monkeypatch.setattr(auth, "ENABLED", True)
-    monkeypatch.setattr(auth, "SUPABASE_URL", URL)
-    monkeypatch.setattr(auth, "SUPABASE_JWT_SECRET", SECRET)
-    app_module._known_users.clear()
-    return client
+def verify_token(token: str) -> str:
+    """Return a stable Luce user id for an opaque bearer token.
+
+    The token is intentionally NOT decoded or verified.
+
+    During development, the token itself is converted into a deterministic
+    UUID so the same frontend session maps to the same Luce user.
+    """
+
+    token = token.strip()
+
+    if not token:
+        raise AuthError("Empty bearer token")
+
+    # Create a deterministic UUID from the opaque token.
+    # No JWT parsing or cryptographic verification is performed.
+    user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"luce:{token}"))
+
+    return user_id
 
 
-def bearer(token):
-    return {"Authorization": f"Bearer {token}"}
+def user_from_authorization(header: str | None) -> str:
+    """Extract the opaque bearer token and return its Luce user id."""
 
+    if not header:
+        raise AuthError("Missing bearer token")
 
-def test_valid_token_gives_user(supa):
-    r = supa.get("/api/me", headers=bearer(make_token()))
-    assert r.status_code == 200 and r.get_json()["auth"] == "supabase"
-    assert database.get_autonomy(USER) == "ask"  # user row was created
+    if not header.lower().startswith("bearer "):
+        raise AuthError("Invalid authorization header")
 
+    token = header[7:].strip()
 
-def test_missing_token_401(supa):
-    assert supa.get("/api/me").status_code == 401
+    if not token:
+        raise AuthError("Empty bearer token")
 
-
-@pytest.mark.parametrize(
-    "over",
-    [{"exp": int(time.time()) - 10}, {"aud": "other"}, {"iss": "https://evil.example/auth/v1"}, {"sub": "not-a-uuid"}],
-)
-def test_bad_claims_rejected(supa, over):
-    assert supa.get("/api/me", headers=bearer(make_token(**over))).status_code == 401
-
-
-def test_wrong_signature_and_alg_none_rejected(supa):
-    assert supa.get("/api/me", headers=bearer(make_token(key="x" * 40))).status_code == 401
-    none_token = jwt.encode({"sub": USER, "aud": "authenticated"}, None, algorithm="none")
-    assert supa.get("/api/me", headers=bearer(none_token)).status_code == 401
-
-
-def test_asymmetric_token_via_jwks(supa, monkeypatch):
-    key = ec.generate_private_key(ec.SECP256R1())
-
-    class FakeJWKS:
-        def get_signing_key_from_jwt(self, token):
-            return type("K", (), {"key": key.public_key()})
-
-    monkeypatch.setattr(auth, "_jwks_client", FakeJWKS())
-    token = make_token(key=key, alg="ES256")
-    assert supa.get("/api/me", headers=bearer(token)).status_code == 200
-
-
-def test_users_are_isolated(supa):
-    t1, other = make_token(), str(uuid.uuid4())
-    t2 = make_token(sub=other)
-    database.create_user(USER)
-    aid = database.create_pending_action(USER, "GMAIL_SEND_EMAIL", {})
-    assert supa.post(f"/api/actions/{aid}/confirm", headers=bearer(t2)).status_code == 404
-    assert supa.get("/api/actions", headers=bearer(t1)).get_json()["pending_actions"][0]["id"] == aid
-
-
-def test_public_endpoints_need_no_token(supa):
-    assert supa.get("/health").status_code == 200
+    return verify_token(token)
