@@ -26,14 +26,11 @@ def get_db():
     class DummyResult:
         def fetchall(self): return []
         def fetchone(self): return None
-
     class DummyConn:
-        def execute(self, query, params=()):
-            return DummyResult()
+        def execute(self, query, params=()): return DummyResult()
         def commit(self): pass
         def rollback(self): pass
         def close(self): pass
-        
     yield DummyConn()
 # -------------------------------------------------------------------
 
@@ -101,16 +98,25 @@ def clear_messages(user_id: str):
         pass
 
 def create_pending_action(user_id: str, tool: str, arguments: dict) -> str:
-    if not supabase: return uuid.uuid4().hex
+    if not supabase: 
+        logger.error("Supabase client is None. Cannot create pending action.")
+        raise RuntimeError("Supabase non configuré")
+    
     action_id = uuid.uuid4().hex
     try:
-        supabase.table("pending_actions").insert({
-            "id": action_id, "user_id": user_id, "tool": tool,
-            "arguments": json.dumps(arguments, default=str), "status": "pending"
+        # L'insertion doit réussir, sinon on lève l'exception pour voir l'erreur dans les logs Vercel
+        res = supabase.table("pending_actions").insert({
+            "id": action_id, 
+            "user_id": user_id, 
+            "tool": tool,
+            "arguments": json.dumps(arguments, default=str), 
+            "status": "pending"
         }).execute()
+        logger.info("✅ Pending action %s créée avec succès pour l'utilisateur %s", action_id, user_id)
+        return action_id
     except Exception as e:
-        logger.error("Failed to create pending action: %s", e)
-    return action_id
+        logger.error("❌ ÉCHEC CRITIQUE lors de la création de l'action en attente: %s", e)
+        raise  # On ne cache plus l'erreur !
 
 def _action_row(row: dict):
     return {
