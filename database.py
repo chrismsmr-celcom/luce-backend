@@ -73,9 +73,14 @@ def save_composio_session_id(user_id: str, session_id: str):
 def save_message(user_id: str, role: str, content: str):
     if not supabase: return
     try:
-        supabase.table("messages").insert({"user_id": user_id, "role": role, "content": content}).execute()
-    except Exception:
-        pass
+        supabase.table("messages").insert(
+            {"user_id": user_id, "role": role, "content": content}
+        ).execute()
+    except Exception as exc:
+        # L'historique est un bonus, pas une dépendance critique :
+        # on logge (visible dans Vercel) mais on ne casse pas la requête.
+        logger.error("save_message failed (user=%s role=%s): %s",
+                     user_id, role, exc)
 
 def get_messages(user_id: str, limit: int | None = None):
     if not supabase: return []
