@@ -23,25 +23,29 @@ USE_PG = False
 
 @contextmanager
 def get_db():
-    class DummyConn:
-        def execute(self, query, params=()): pass
-        def fetchone(self): return None
+    class DummyResult:
         def fetchall(self): return []
+        def fetchone(self): return None
+
+    class DummyConn:
+        def execute(self, query, params=()):
+            return DummyResult()
+        def commit(self): pass
+        def rollback(self): pass
+        def close(self): pass
+        
     yield DummyConn()
 # -------------------------------------------------------------------
 
 def init_db():
     if supabase:
-        logger.info("Base de données initialisée avec Supabase (table: luce_users).")
+        logger.info("Base de données initialisée avec Supabase.")
     else:
         logger.error("Impossible d'initialiser Supabase : variables d'environnement manquantes.")
 
 def create_user(user_id: str):
     if not supabase: return
-    supabase.table("luce_users").upsert(
-        {"id": user_id, "autonomy": "ask"}, 
-        on_conflict="id"
-    ).execute()
+    supabase.table("luce_users").upsert({"id": user_id, "autonomy": "ask"}, on_conflict="id").execute()
 
 def delete_user(user_id: str):
     if not supabase: return
@@ -74,7 +78,7 @@ def save_message(user_id: str, role: str, content: str):
     try:
         supabase.table("messages").insert({"user_id": user_id, "role": role, "content": content}).execute()
     except Exception:
-        pass  # Ignore si la table n'existe pas encore
+        pass
 
 def get_messages(user_id: str, limit: int | None = None):
     if not supabase: return []
@@ -104,8 +108,8 @@ def create_pending_action(user_id: str, tool: str, arguments: dict) -> str:
             "id": action_id, "user_id": user_id, "tool": tool,
             "arguments": json.dumps(arguments, default=str), "status": "pending"
         }).execute()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to create pending action: %s", e)
     return action_id
 
 def _action_row(row: dict):
