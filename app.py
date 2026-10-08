@@ -168,6 +168,8 @@ def server_error(message: str, exc: Exception):
 
 import data  # noqa: E402
 data.register(app, get_user_id, server_error)
+import proposals  # noqa: E402
+proposals.register(app, get_user_id, server_error, rate_limited)
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
