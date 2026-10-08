@@ -68,9 +68,12 @@ logger.info("LLM cascade: %s", " -> ".join(f"{p['name']}/{p['model']}" for p in 
 # ============================================================
 
 def search_web(query: str) -> str:
-    """Search the web in real time using DuckDuckGo HTML (bypasses bot blocks)."""
+    """Search the web for news and facts using DuckDuckGo HTML (optimized for precision)."""
     try:
-        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+        # On force la recherche d'actualités récentes pour éviter les pages d'index génériques
+        enhanced_query = f"{query} actualités récentes 2024 2025"
+        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(enhanced_query) + "&ia=news"
+        
         req = urllib.request.Request(
             url, 
             headers={
@@ -82,25 +85,27 @@ def search_web(query: str) -> str:
             html = response.read().decode("utf-8")
         
         results = []
+        # Ciblage plus précis des blocs de résultats DuckDuckGo
         blocks = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
         urls = re.findall(r'<a class="result__url[^>]*>(.*?)</a>', html, re.IGNORECASE)
         titles = re.findall(r'<a class="result__title[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
         
-        clean = lambda t: re.sub(r'<[^>]+>', '', t).strip().replace('\n', ' ')
+        clean = lambda t: re.sub(r'<[^>]+>', '', t).strip().replace('\n', ' ').replace('\r', '')
         
         for i in range(min(5, len(blocks))):
             title = clean(titles[i]) if i < len(titles) else "N/A"
             snippet = clean(blocks[i])
             source = clean(urls[i]) if i < len(urls) else "N/A"
-            results.append(f"TITRE: {title}\nEXTRAIT: {snippet}\nSOURCE: {source}")
+            if snippet and snippet != "N/A":
+                results.append(f"TITRE: {title}\nEXTRAIT: {snippet}\nSOURCE: {source}")
             
         if not results:
-            return "Aucun résultat trouvé sur le web pour cette requête."
+            return f"Aucun résultat d'actualité précis trouvé pour : '{query}'. Essayez de préciser le sujet (ex: une entreprise ou un événement spécifique)."
             
         return "\n\n---\n\n".join(results)
     except Exception as e:
         logger.warning("Web search failed: %s", e)
-        return f"Erreur lors de la recherche web : {str(e)}"
+        return f"Erreur technique lors de la recherche web : {str(e)}"
 
 
 WEB_SEARCH_TOOL = {
