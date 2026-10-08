@@ -114,6 +114,7 @@ def _map_email(m: dict) -> dict:
         "date": _text(m.get("messageTimestamp") or m.get("message_timestamp") or m.get("date")),
         "unread": "UNREAD" in labels,
         "priority": "IMPORTANT" in labels or "STARRED" in labels,
+        "hasAttachments": bool(m.get("attachmentList") or m.get("attachments")),
     }
 
 
