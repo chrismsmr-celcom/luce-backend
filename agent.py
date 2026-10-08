@@ -35,9 +35,9 @@ logger = logging.getLogger("luce.agent")
 # ============================================================
 
 MAX_TOOL_ROUNDS = int(os.getenv("LUCE_MAX_TOOL_ROUNDS", "12"))
-HISTORY_LIMIT = int(os.getenv("LUCE_HISTORY_LIMIT", "40"))
+HISTORY_LIMIT = int(os.getenv("LUCE_HISTORY_LIMIT", "16"))
 MAX_TOOL_RESULT_CHARS = int(
-    os.getenv("LUCE_MAX_TOOL_RESULT_CHARS", "24000")
+    os.getenv("LUCE_MAX_TOOL_RESULT_CHARS", "8000")
 )
 MAX_ERROR_CHARS = 500
 MAX_WEB_RESULTS = int(os.getenv("LUCE_MAX_WEB_RESULTS", "6"))
@@ -839,7 +839,7 @@ For an operational request:
 
 Avoid vague endings such as:
 
-"Let me know if you want me to continue."
+"Let me know if you want to continue."
 
 Only ask for a follow-up when it is genuinely useful.
 
@@ -1562,10 +1562,50 @@ def process_message(
             user_id,
         )
 
-        response = call_llm(
-            messages=messages,
-            tools=tools,
-        )
+        try:
+            response = call_llm(
+                messages=messages,
+                tools=tools,
+            )
+        except Exception as exc:
+            # Journalise la traceback complète (visible dans les logs
+            # Vercel au niveau error) au lieu d'un simple 500 silencieux.
+            logger.exception(
+                "LLM call failed at round %d/%d for user=%s",
+                round_number + 1,
+                MAX_TOOL_ROUNDS,
+                user_id,
+            )
+
+            if round_number == 0:
+                # Aucun travail n'a encore été fait : remonter l'erreur
+                # pour que l'API réponde 500 avec un log explicite.
+                raise
+
+            # Au moins un round a déjà été exécuté : répondre gracieusement
+            # au lieu d'un 500, en préservant les actions en attente.
+            fallback = (
+                "J'ai commencé l'investigation, mais une erreur "
+                "technique m'a interrompue ("
+                + type(exc).__name__
+                + " : fournisseur LLM indisponible ou limite de "
+                "contexte dépassée). Aucune donnée n'a été perdue. "
+                "Réessaie dans un instant."
+            )
+
+            save_message(
+                user_id=user_id,
+                role="assistant",
+                content=fallback,
+            )
+
+            return {
+                "message": fallback,
+                "tool_called": tool_called,
+                "autonomy": autonomy,
+                "pending_actions": pending_actions,
+                "pending_approvals": pending_approvals,
+            }
 
         assistant_message = (
             response.choices[0].message
@@ -1769,4 +1809,3 @@ def process_message(
         "pending_actions": pending_actions,
         "pending_approvals": pending_approvals,
     }
-    
