@@ -8,3 +8,4 @@ psycopg[binary]>=3.1,<4
 PyJWT[crypto]>=2.8,<3
 gunicorn>=22.0
 supabase
+duckduckgo-search>=6.0.0
