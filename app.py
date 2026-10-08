@@ -139,7 +139,7 @@ import data  # noqa: E402
 data.register(app, get_user_id, server_error)
 
 # AJOUT ESSENTIEL : Enregistrement des routes mail (détail et pièces jointes)
-from src.lib import mail  # noqa: E402
+import mail  # noqa: E402
 mail.register(app, get_user_id, server_error)
 
 import proposals  # noqa: E402
