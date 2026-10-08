@@ -166,7 +166,8 @@ def server_error(message: str, exc: Exception):
     app.logger.exception(message)
     return jsonify({"error": message}), 500
 
-
+import data  # noqa: E402
+data.register(app, get_user_id, server_error)
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
