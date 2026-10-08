@@ -37,7 +37,25 @@ from toolkits import TOOLKIT_SET, TOOLKITS  # noqa: E402
 
 PRODUCTION = os.getenv("LUCE_ENV", "development").lower() == "production"
 
-ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("FRONTEND_ORIGINS", "").split(",") if o.strip()]
+def _parse_origins(raw: str) -> list[str]:
+    """Tolère les erreurs de saisie courantes dans la variable Vercel : guillemets, slash final,
+    chemin (https://site.app/connexions), séparateurs , ; ou retours à la ligne."""
+    from urllib.parse import urlparse
+
+    origins: list[str] = []
+    for item in raw.replace(";", ",").replace("\n", ",").split(","):
+        item = item.strip().strip("\"'").strip()
+        if not item:
+            continue
+        if "://" in item:
+            parts = urlparse(item)
+            item = f"{parts.scheme}://{parts.netloc}"
+        origins.append(item.rstrip("/"))
+    return origins
+
+
+# FRONTEND_ORIGIN (singulier) accepté aussi : faute de frappe très fréquente.
+ALLOWED_ORIGINS = _parse_origins(os.getenv("FRONTEND_ORIGINS") or os.getenv("FRONTEND_ORIGIN") or "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "/connexions")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
@@ -148,7 +166,9 @@ proposals.register(app, get_user_id, server_error, rate_limited)
 @app.get("/health")
 @app.get("/api/health")
 def health():
-    return jsonify({"status": "ok", "service": "luce"})
+    # Diagnostic : montre ce que le serveur lit réellement (aucun secret). Si "cors_origins" est vide,
+    # FRONTEND_ORIGINS est absente / mal saisie dans le projet Vercel du backend.
+    return jsonify({"status": "ok", "service": "luce", "cors_origins": ALLOWED_ORIGINS, "auth": auth.ENABLED})
 
 @app.get("/api/me")
 def me():
