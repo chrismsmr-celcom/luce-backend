@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import urllib.parse
+import urllib.request
 from typing import Any
 
 from dotenv import load_dotenv
@@ -29,11 +31,6 @@ logger = logging.getLogger("luce.agent")
 # ============================================================
 # CONFIGURATION
 # ============================================================
-# Providers are tried in order. Only providers whose API key is set are used,
-# so the app runs with a single key. Beware: tool results (emails, documents)
-# are sent to whichever provider answers — do not enable a provider whose data
-# policy you have not checked.
-
 MAX_TOOL_ROUNDS = int(os.getenv("LUCE_MAX_TOOL_ROUNDS", "8"))
 HISTORY_LIMIT = int(os.getenv("LUCE_HISTORY_LIMIT", "30"))
 MAX_TOOL_RESULT_CHARS = int(os.getenv("LUCE_MAX_TOOL_RESULT_CHARS", "20000"))
@@ -57,40 +54,50 @@ for _name, _key_env, _url, _model_env, _default_model in _PROVIDER_DEFS:
             }
         )
 
-# LUCE_PROVIDERS="deepseek" restricts the cascade (e.g. keep private data off free tiers).
 _allowed = [p.strip() for p in os.getenv("LUCE_PROVIDERS", "").split(",") if p.strip()]
 if _allowed:
     PROVIDERS = [p for p in PROVIDERS if p["name"] in _allowed]
 
 if not PROVIDERS:
-    raise RuntimeError(
-        "No LLM provider configured: set DEEPSEEK_API_KEY, OPENROUTER_API_KEY or CEREBRAS_API_KEY"
-    )
+    raise RuntimeError("No LLM provider configured: set DEEPSEEK_API_KEY, OPENROUTER_API_KEY or CEREBRAS_API_KEY")
 
 logger.info("LLM cascade: %s", " -> ".join(f"{p['name']}/{p['model']}" for p in PROVIDERS))
 
 # ============================================================
-# WEB SEARCH TOOL (Native, no API key required)
+# WEB SEARCH TOOL (Native, ultra-reliable on Vercel)
 # ============================================================
 
 def search_web(query: str) -> str:
-    """Search the web in real time using DuckDuckGo. Returns formatted results."""
+    """Search the web in real time using DuckDuckGo HTML (bypasses bot blocks)."""
     try:
-        from duckduckgo_search import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
-
+        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+        req = urllib.request.Request(
+            url, 
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode("utf-8")
+        
+        results = []
+        blocks = re.findall(r'<a class="result__snippet[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
+        urls = re.findall(r'<a class="result__url[^>]*>(.*?)</a>', html, re.IGNORECASE)
+        titles = re.findall(r'<a class="result__title[^>]*>(.*?)</a>', html, re.IGNORECASE | re.DOTALL)
+        
+        clean = lambda t: re.sub(r'<[^>]+>', '', t).strip().replace('\n', ' ')
+        
+        for i in range(min(5, len(blocks))):
+            title = clean(titles[i]) if i < len(titles) else "N/A"
+            snippet = clean(blocks[i])
+            source = clean(urls[i]) if i < len(urls) else "N/A"
+            results.append(f"TITRE: {title}\nEXTRAIT: {snippet}\nSOURCE: {source}")
+            
         if not results:
             return "Aucun résultat trouvé sur le web pour cette requête."
-
-        formatted = []
-        for r in results:
-            formatted.append(
-                f"TITRE: {r.get('title', 'N/A')}\n"
-                f"EXTRAIT: {r.get('body', 'N/A')}\n"
-                f"SOURCE: {r.get('href', 'N/A')}"
-            )
-        return "\n\n---\n\n".join(formatted)
+            
+        return "\n\n---\n\n".join(results)
     except Exception as e:
         logger.warning("Web search failed: %s", e)
         return f"Erreur lors de la recherche web : {str(e)}"
@@ -100,11 +107,7 @@ WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "search_web",
-        "description": (
-            "Search the web for real-time information, news, market data, facts, "
-            "or anything not available in the user's connected apps. "
-            "Use it proactively when the user asks for up-to-date information."
-        ),
+        "description": "Search the web for real-time information, news, market data, facts, or anything not available in the user's connected apps. Use it proactively when the user asks for up-to-date information.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -117,7 +120,6 @@ WEB_SEARCH_TOOL = {
         },
     },
 }
-
 
 # ============================================================
 # SYSTEM PROMPT
@@ -154,8 +156,6 @@ IMPORTANT TOOL RULES
     for real-time information, news, market data, or facts that are not available
     in their connected apps. Always cite the source (SOURCE) when providing web data.
 13. You can combine data from the user's apps AND from the web in a single answer.
-    For example, if the user asks "what's new in AI this week and do I have unread
-    emails from my team?", use both Gmail tools and search_web, then synthesize.
 
 Answer in the user's language (default: French).
 """
@@ -171,11 +171,6 @@ AUTONOMY_NOTES = {
 # ============================================================
 
 def serialize_result(result: Any) -> str:
-    """
-    Convert a Composio result into JSON text that can safely
-    be sent back to the LLM.
-    """
-
     try:
         text = json.dumps(result, ensure_ascii=False, default=str)
     except Exception:
@@ -190,92 +185,35 @@ def serialize_result(result: Any) -> str:
 # ============================================================
 
 def _get_value(obj: Any, name: str, default=None):
-    """
-    Read an attribute from either a normal Python object
-    or a dictionary.
-    """
-
     if isinstance(obj, dict):
         return obj.get(name, default)
-
     return getattr(obj, name, default)
 
 
 def normalize_composio_tool(tool: Any) -> dict:
-    """
-    Convert a Composio tool object into OpenAI-compatible
-    function-tool format.
-    """
-
     name = _get_value(tool, "name")
-
-    description = _get_value(
-        tool,
-        "description",
-        "",
-    )
-
-    parameters = _get_value(
-        tool,
-        "parameters",
-    )
-
-    # --------------------------------------------------------
-    # Alternative schema field names
-    # --------------------------------------------------------
+    description = _get_value(tool, "description", "")
+    parameters = _get_value(tool, "parameters")
 
     if parameters is None:
-        parameters = _get_value(
-            tool,
-            "input_schema",
-        )
-
+        parameters = _get_value(tool, "input_schema")
     if parameters is None:
-        parameters = _get_value(
-            tool,
-            "schema",
-        )
+        parameters = _get_value(tool, "schema")
 
-    # --------------------------------------------------------
-    # Some wrappers expose the function definition itself
-    # --------------------------------------------------------
-
-    function = _get_value(
-        tool,
-        "function",
-    )
-
+    function = _get_value(tool, "function")
     if function is not None:
-
         if name is None:
-            name = _get_value(
-                function,
-                "name",
-            )
-
+            name = _get_value(function, "name")
         if not description:
-            description = _get_value(
-                function,
-                "description",
-                "",
-            )
-
+            description = _get_value(function, "description", "")
         if parameters is None:
-            parameters = _get_value(
-                function,
-                "parameters",
-            )
+            parameters = _get_value(function, "parameters")
 
     if not name:
-        raise ValueError(
-            f"Composio tool has no name: {tool!r}"
-        )
+        raise ValueError(f"Composio tool has no name: {tool!r}")
 
     if not isinstance(parameters, dict):
-        parameters = {
-            "type": "object",
-            "properties": {},
-        }
+        parameters = {"type": "object", "properties": {}}
 
     return {
         "type": "function",
@@ -288,40 +226,22 @@ def normalize_composio_tool(tool: Any) -> dict:
 
 
 def get_composio_tools(user_id: str) -> list[dict]:
-    """
-    Retrieve the user's Composio tools and convert them
-    to OpenAI-compatible function format.
-    """
-
     session = get_or_create_session(user_id)
-
     raw_tools = session.tools()
-
     normalized_tools = []
 
     for tool in raw_tools:
-
         try:
-
-            normalized = normalize_composio_tool(
-                tool
-            )
-
-            normalized_tools.append(
-                normalized
-            )
-
+            normalized_tools.append(normalize_composio_tool(tool))
         except Exception as exc:
-
             logger.warning("Could not normalize Composio tool: %s", exc)
 
     logger.info("Loaded %d tools from Composio", len(normalized_tools))
-
     return normalized_tools
 
 
 # ============================================================
-# AUTONOMY (enforced server-side, not just in the prompt)
+# AUTONOMY
 # ============================================================
 
 _WRITE_VERBS = (
@@ -334,7 +254,6 @@ _READ_VERBS = ("GET", "LIST", "FETCH", "SEARCH", "FIND", "READ", "QUERY", "LOOKU
 
 
 def is_write_tool(tool_name: str) -> bool:
-    """Heuristic on the Composio slug (e.g. GMAIL_SEND_EMAIL). Unknown verbs are treated as writes."""
     parts = re.split(r"[_\s]+", tool_name.upper())
     action = parts[1:] or parts
     if any(p in _WRITE_VERBS for p in action):
@@ -347,7 +266,6 @@ def is_draft_tool(tool_name: str) -> bool:
 
 
 def requires_confirmation(tool_name: str, autonomy: str) -> bool:
-    # Web search is read-only and has no side effects: never requires confirmation.
     if tool_name == "search_web":
         return False
     if not is_write_tool(tool_name):
@@ -356,7 +274,7 @@ def requires_confirmation(tool_name: str, autonomy: str) -> bool:
         return False
     if autonomy == "draft":
         return not is_draft_tool(tool_name)
-    return True  # "ask"
+    return True
 
 
 def _short_error(exc: Exception | str) -> str:
@@ -368,7 +286,6 @@ def _short_error(exc: Exception | str) -> str:
 # ============================================================
 
 def call_llm(messages: list[dict], tools: list[dict] | None = None):
-    """Try each configured provider in order; raise if all fail."""
     kwargs = {"messages": messages, "temperature": 0.2}
     if tools:
         kwargs["tools"] = tools
@@ -390,10 +307,6 @@ def call_llm(messages: list[dict], tools: list[dict] | None = None):
 # ============================================================
 
 def execute_with_cerbere(user_id: str, tool_name: str, arguments: dict) -> dict:
-    """Execute a Composio tool through Cerbere. Fails closed.
-
-    Arguments and results are NOT logged (they contain the user's emails/documents).
-    """
     logger.info("Tool call: %s (user=%s)", tool_name, user_id)
 
     def protected_execution(**kwargs):
@@ -404,38 +317,27 @@ def execute_with_cerbere(user_id: str, tool_name: str, arguments: dict) -> dict:
             tool_name=tool_name, params=arguments, func=protected_execution
         )
         return {"success": True, "blocked": False, "tool": tool_name, "result": result}
-
     except ApprovalRequiredException as exc:
         logger.info("Tool %s pending Cerbere approval (%s)", tool_name, getattr(exc, "approval_id", None))
         return {
-            "success": False,
-            "blocked": False,
-            "pending_approval": True,
-            "tool": tool_name,
+            "success": False, "blocked": False, "pending_approval": True, "tool": tool_name,
             "approval_id": getattr(exc, "approval_id", None),
             "error": "Pending approval: the action will run once it is approved. Tell the user.",
         }
-
     except ApprovalRejectedException:
         return {"success": False, "blocked": True, "tool": tool_name, "error": "Action rejected by the approver."}
-
     except SecurityException as exc:
         logger.warning("Tool %s blocked by Cerbere: %s", tool_name, _short_error(exc))
         return {"success": False, "blocked": True, "tool": tool_name, "error": _short_error(exc)}
-
     except Exception as exc:
-        # Anything else (network, Composio, bug): fail closed with a generic message.
         logger.exception("Tool %s failed", tool_name)
         return {
-            "success": False,
-            "blocked": False,
-            "tool": tool_name,
+            "success": False, "blocked": False, "tool": tool_name,
             "error": "The tool failed to run (" + type(exc).__name__ + "). Nothing was changed.",
         }
 
 
 def run_confirmed_action(user_id: str, tool_name: str, arguments: dict) -> dict:
-    """Run an action the user explicitly confirmed. Still goes through Cerbere."""
     return execute_with_cerbere(user_id, tool_name, arguments)
 
 
@@ -462,29 +364,22 @@ def assistant_message_to_dict(message: Any) -> dict:
 # ============================================================
 
 def process_message(user_id: str, message: str) -> dict:
-    """Run the agent loop. Returns the final answer plus anything awaiting the user."""
-
     autonomy = get_autonomy(user_id)
     get_or_create_session(user_id)
 
-    # 1. Sauvegarder dans l'historique (base de données)
     save_message(user_id=user_id, role="user", content=message)
 
-    # 2. Construire le prompt pour l'IA
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT + "\n" + AUTONOMY_NOTES[autonomy]}
     ]
     
-    # Récupérer l'historique
     history = get_messages(user_id, limit=HISTORY_LIMIT)
     messages.extend(history)
     
-    # 3. CORRECTION CRITIQUE : S'assurer que le message actuel est bien présent.
-    # (Au cas où la lecture DB n'aurait pas encore capté l'insertion juste au-dessus)
+    # CORRECTION CRITIQUE : S'assurer que le message actuel est bien présent
     if not history or history[-1].get("role") != "user" or history[-1].get("content") != message:
         messages.append({"role": "user", "content": message})
 
-    # 4. Charger les outils (Composio + Recherche Web)
     tools = get_composio_tools(user_id)
     tools.append(WEB_SEARCH_TOOL)
 
@@ -492,12 +387,10 @@ def process_message(user_id: str, message: str) -> dict:
     pending_approvals: list[dict] = []
     tool_called = False
 
-    # 5. Boucle de raisonnement de l'agent
     for round_number in range(MAX_TOOL_ROUNDS):
         response = call_llm(messages=messages, tools=tools)
         assistant_message = response.choices[0].message
 
-        # Si l'IA a fini de réfléchir et donne une réponse texte
         if not assistant_message.tool_calls:
             content = assistant_message.content or ""
             save_message(user_id=user_id, role="assistant", content=content)
@@ -509,7 +402,6 @@ def process_message(user_id: str, message: str) -> dict:
                 "pending_approvals": pending_approvals,
             }
 
-        # Sinon, elle veut utiliser un outil
         messages.append(assistant_message_to_dict(assistant_message))
         tool_called = True
 
@@ -524,28 +416,19 @@ def process_message(user_id: str, message: str) -> dict:
                 result = {"success": False, "blocked": True, "tool": tool_name,
                           "error": f"Invalid arguments generated by model: {_short_error(exc)}"}
             else:
-                # Recherche Web native (exécutée directement, pas de confirmation nécessaire)
                 if tool_name == "search_web":
                     search_query = arguments.get("query", "")
                     search_result = search_web(search_query)
                     result = {
-                        "success": True,
-                        "blocked": False,
-                        "tool": tool_name,
-                        "result": search_result,
+                        "success": True, "blocked": False, "tool": tool_name, "result": search_result,
                     }
-                # Outils nécessitant une confirmation utilisateur (selon le niveau d'autonomie)
                 elif requires_confirmation(tool_name, autonomy):
                     action_id = create_pending_action(user_id, tool_name, arguments)
                     pending_actions.append({"id": action_id, "tool": tool_name, "arguments": arguments})
                     result = {
-                        "success": False,
-                        "blocked": False,
-                        "queued_for_confirmation": True,
-                        "tool": tool_name,
-                        "error": "Queued for user confirmation. It has NOT been executed yet.",
+                        "success": False, "blocked": False, "queued_for_confirmation": True,
+                        "tool": tool_name, "error": "Queued for user confirmation. It has NOT been executed yet.",
                     }
-                # Outils d'exécution directe via Cerbere/Composio
                 else:
                     result = execute_with_cerbere(user_id, tool_name, arguments)
                     if result.get("pending_approval"):
@@ -553,7 +436,6 @@ def process_message(user_id: str, message: str) -> dict:
                             {"tool": tool_name, "approval_id": result.get("approval_id")}
                         )
 
-            # Renvoyer le résultat de l'outil à l'IA pour qu'elle continue
             messages.append(
                 {
                     "role": "tool",
@@ -562,7 +444,6 @@ def process_message(user_id: str, message: str) -> dict:
                 }
             )
 
-    # Fallback si la limite de tours est atteinte
     fallback = "Je n'ai pas pu terminer : la limite d'étapes de l'agent a été atteinte."
     save_message(user_id=user_id, role="assistant", content=fallback)
     return {
