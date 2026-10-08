@@ -7,3 +7,4 @@ composio==0.17.1
 psycopg[binary]>=3.1,<4
 PyJWT[crypto]>=2.8,<3
 gunicorn>=22.0
+supabase
