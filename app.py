@@ -20,6 +20,7 @@ logging.basicConfig(
 from agent import process_message, run_confirmed_action  # noqa: E402
 import auth  # noqa: E402
 from composio_service import authorize_toolkit, list_connected_accounts  # noqa: E402
+from data_snapshots import build_snapshots  # noqa: E402  <-- AJOUT
 from database import (  # noqa: E402
     AUTONOMY_LEVELS,
     claim_pending_action,
@@ -36,6 +37,7 @@ from database import (  # noqa: E402
 from toolkits import TOOLKIT_SET, TOOLKITS  # noqa: E402
 
 PRODUCTION = os.getenv("LUCE_ENV", "development").lower() == "production"
+
 
 def _parse_origins(raw: str) -> list[str]:
     """Tolère les erreurs de saisie courantes dans la variable Vercel : guillemets, slash final,
@@ -87,6 +89,7 @@ if ALLOWED_ORIGINS:
 
 init_db()
 
+
 @app.before_request
 def csrf_guard():
     if request.method in ("GET", "HEAD", "OPTIONS") or not request.path.startswith("/api/"):
@@ -101,6 +104,7 @@ def csrf_guard():
             return jsonify({"error": "Origin not allowed"}), 403
     return None
 
+
 @app.after_request
 def security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -110,6 +114,7 @@ def security_headers(resp):
 
 _hits: dict[str, deque] = defaultdict(deque)
 _hits_lock = Lock()
+
 
 def rate_limited(key: str, limit: int | None = None, window: int | None = None) -> bool:
     limit = CHAT_RATE_LIMIT if limit is None else limit
@@ -126,6 +131,7 @@ def rate_limited(key: str, limit: int | None = None, window: int | None = None) 
 
 _known_users: set[str] = set()
 
+
 def get_user_id() -> str:
     if auth.ENABLED:
         user_id = auth.user_from_authorization(request.headers.get("Authorization"))
@@ -141,13 +147,16 @@ def get_user_id() -> str:
         create_user(user_id)
     return session["user_id"]
 
+
 @app.errorhandler(auth.AuthError)
 def unauthorized(exc):
     return jsonify({"error": "Authentification requise", "reason": str(exc)}), 401
 
+
 def callback_url() -> str:
     base = PUBLIC_BASE_URL or request.host_url.rstrip("/")
     return base + "/api/composio/callback"
+
 
 def server_error(message: str, exc: Exception):
     app.logger.exception(message)
@@ -156,19 +165,23 @@ def server_error(message: str, exc: Exception):
 import data  # noqa: E402
 data.register(app, get_user_id, server_error)
 
-# AJOUT ESSENTIEL : Enregistrement des routes mail (détail et pièces jointes)
 import mail  # noqa: E402
 mail.register(app, get_user_id, server_error)
 
 import proposals  # noqa: E402
 proposals.register(app, get_user_id, server_error, rate_limited)
 
+
 @app.get("/health")
 @app.get("/api/health")
 def health():
-    # Diagnostic : montre ce que le serveur lit réellement (aucun secret). Si "cors_origins" est vide,
-    # FRONTEND_ORIGINS est absente / mal saisie dans le projet Vercel du backend.
-    return jsonify({"status": "ok", "service": "luce", "cors_origins": ALLOWED_ORIGINS, "auth": auth.ENABLED})
+    return jsonify({
+        "status": "ok",
+        "service": "luce",
+        "cors_origins": ALLOWED_ORIGINS,
+        "auth": auth.ENABLED,
+    })
+
 
 @app.get("/api/me")
 def me():
@@ -182,6 +195,7 @@ def me():
         }
     )
 
+
 @app.post("/api/connect/<toolkit>")
 def connect_toolkit(toolkit):
     if toolkit not in TOOLKIT_SET:
@@ -192,9 +206,11 @@ def connect_toolkit(toolkit):
     except Exception as exc:
         return server_error("Impossible de démarrer la connexion", exc)
 
+
 @app.get("/api/composio/callback")
 def composio_callback():
     return redirect(FRONTEND_URL)
+
 
 @app.get("/api/connections")
 def connections():
@@ -209,14 +225,30 @@ def connections():
     except Exception as exc:
         return server_error("Impossible de lire les connexions", exc)
 
+
+# ---------------------------------------------------------------------------
+# NOUVELLE ROUTE : snapshots génériques pour le carrousel.
+# Même pattern d'auth que /api/connections (get_user_id + errorhandler AuthError).
+# ---------------------------------------------------------------------------
+@app.get("/api/data/snapshots")
+def tool_snapshots():
+    user_id = get_user_id()
+    try:
+        return jsonify(build_snapshots(user_id))
+    except Exception as exc:
+        return server_error("Impossible de lire les snapshots", exc)
+
+
 @app.get("/api/history")
 def history():
     return jsonify({"messages": get_messages(get_user_id())})
+
 
 @app.post("/api/history/clear")
 def history_clear():
     clear_messages(get_user_id())
     return jsonify({"success": True})
+
 
 @app.post("/api/settings")
 def settings():
@@ -227,6 +259,7 @@ def settings():
         return jsonify({"error": "Invalid autonomy level"}), 400
     set_autonomy(user_id, level)
     return jsonify({"autonomy": level})
+
 
 @app.post("/api/chat")
 def chat():
@@ -248,9 +281,11 @@ def chat():
     except Exception as exc:
         return server_error("Luce n'a pas pu traiter la demande", exc)
 
+
 @app.get("/api/actions")
 def actions():
     return jsonify({"pending_actions": list_pending_actions(get_user_id())})
+
 
 @app.post("/api/actions/<action_id>/confirm")
 def confirm_action(action_id):
@@ -273,6 +308,7 @@ def confirm_action(action_id):
         }
     )
 
+
 @app.post("/api/actions/<action_id>/reject")
 def reject_action(action_id):
     user_id = get_user_id()
@@ -282,10 +318,12 @@ def reject_action(action_id):
         return jsonify({"error": "Action already handled"}), 409
     return jsonify({"success": True})
 
+
 @app.post("/api/logout")
 def logout():
     session.clear()
     return jsonify({"success": True})
+
 
 @app.post("/api/account/delete")
 def account_delete():
@@ -295,28 +333,16 @@ def account_delete():
     session.clear()
     return jsonify({"success": True})
 
+
 @app.errorhandler(404)
 def not_found(_):
     return jsonify({"error": "Not found"}), 404
+
 
 @app.errorhandler(413)
 def too_large(_):
     return jsonify({"error": "Request too large"}), 413
 
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "10000")), debug=False)
-
-def register_snapshots(app):
-    """Route Flask/FastAPI selon ton app.py (ici version Flask)."""
-
-    from auth import require_user  # ton décorateur/middleware 401 existant
-
-    @app.route("/api/data/snapshots")
-    @require_user
-    def api_tool_snapshots():
-        from flask import jsonify
-        try:
-            return jsonify(build_snapshots(g.user_id)), 200
-        except Exception:
-            logger.exception("GET /api/data/snapshots failed")
-            return jsonify({"error": "Failed to build snapshots"}), 500
