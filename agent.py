@@ -25,7 +25,15 @@ from database import (
 load_dotenv()
 
 logger = logging.getLogger("luce.agent")
+import logging
 
+logger = logging.getLogger(__name__)
+
+try:
+    result = process_message(...)
+except Exception:
+    logger.exception("Luce /api/chat failed")
+    raise
 # ============================================================
 # CONFIGURATION
 # ============================================================
