@@ -305,3 +305,18 @@ def too_large(_):
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=int(os.getenv("PORT", "10000")), debug=False)
+
+def register_snapshots(app):
+    """Route Flask/FastAPI selon ton app.py (ici version Flask)."""
+
+    from auth import require_user  # ton décorateur/middleware 401 existant
+
+    @app.route("/api/data/snapshots")
+    @require_user
+    def api_tool_snapshots():
+        from flask import jsonify
+        try:
+            return jsonify(build_snapshots(g.user_id)), 200
+        except Exception:
+            logger.exception("GET /api/data/snapshots failed")
+            return jsonify({"error": "Failed to build snapshots"}), 500
