@@ -79,32 +79,38 @@ for name, key_env, base_url, model_env, default_model in _PROVIDER_DEFS:
 
 # Example: LUCE_PROVIDERS=deepseek
 # Restricts the cascade to explicitly selected providers.
+# DeepSeek est le fournisseur par défaut.
+# Les autres fournisseurs ne sont utilisés que si LUCE_PROVIDERS
+# les autorise explicitement.
 _allowed = [
     item.strip().lower()
-    for item in os.getenv("LUCE_PROVIDERS", "").split(",")
+    for item in os.getenv("LUCE_PROVIDERS", "deepseek").split(",")
     if item.strip()
 ]
 
-if _allowed:
-    unknown = set(_allowed) - {p["name"] for p in PROVIDERS}
+_configured_providers = {p["name"]: p for p in PROVIDERS}
+unknown = set(_allowed) - set(_configured_providers)
 
-    if unknown:
-        logger.warning(
-            "Requested providers are not configured: %s",
-            ", ".join(sorted(unknown)),
-        )
+if unknown:
+    raise RuntimeError(
+        "Requested providers are not configured: "
+        + ", ".join(sorted(unknown))
+    )
 
-    PROVIDERS = [p for p in PROVIDERS if p["name"] in _allowed]
+PROVIDERS = [
+    _configured_providers[name]
+    for name in _allowed
+]
 
 if not PROVIDERS:
     raise RuntimeError(
-        "No LLM provider configured. Set DEEPSEEK_API_KEY, "
-        "OPENROUTER_API_KEY or CEREBRAS_API_KEY and check LUCE_PROVIDERS."
+        "No LLM provider configured. Set DEEPSEEK_API_KEY "
+        "and check LUCE_PROVIDERS."
     )
 
 logger.info(
-    "LLM cascade: %s",
-    " -> ".join(f"{p['name']}/{p['model']}" for p in PROVIDERS),
+    "LLM provider: %s",
+    ", ".join(f"{p['name']}/{p['model']}" for p in PROVIDERS),
 )
 
 
@@ -380,11 +386,17 @@ def call_llm(messages: list[dict], tools: list[dict] | None = None):
     errors = []
 
     for provider in PROVIDERS:
-        try:
-            return provider["client"].chat.completions.create(
+                try:
+            response = provider["client"].chat.completions.create(
                 model=provider["model"],
                 **kwargs,
             )
+            logger.info(
+                "LLM success: provider=%s model=%s",
+                provider["name"],
+                provider["model"],
+            )
+            return response
         except Exception as exc:
             error = _short_error(exc)
 
