@@ -365,18 +365,13 @@ def _short_error(exc: Exception | str) -> str:
 # LLM CASCADE
 # ============================================================
 
-def call_llm(messages: list[dict], tools: list[dict] | None = None):
-    """
-    Try configured providers in order.
-
-    Falls back to the next provider when a provider request fails.
-    Only configure providers whose data policies are acceptable for
-    the data being processed.
-    """
-
+def call_llm(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+):
     kwargs = {
         "messages": messages,
-        "temperature": 0.2,
+        "temperature": 0.15,
     }
 
     if tools:
@@ -386,7 +381,7 @@ def call_llm(messages: list[dict], tools: list[dict] | None = None):
     errors = []
 
     for provider in PROVIDERS:
-                try:
+        try:
             response = provider["client"].chat.completions.create(
                 model=provider["model"],
                 **kwargs,
@@ -399,19 +394,16 @@ def call_llm(messages: list[dict], tools: list[dict] | None = None):
             return response
         except Exception as exc:
             error = _short_error(exc)
-
             logger.warning(
                 "LLM provider %s failed: %s",
                 provider["name"],
                 error,
             )
-
             errors.append(f"{provider['name']}: {error}")
 
     raise RuntimeError(
         "All LLM providers failed: " + " | ".join(errors)
     )
-
 
 # ============================================================
 # CERBERE SECURITY BOUNDARY
