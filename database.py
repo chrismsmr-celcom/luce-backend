@@ -49,10 +49,20 @@ def delete_user(user_id: str):
     supabase.table("luce_users").delete().eq("id", user_id).execute()
 
 def get_autonomy(user_id: str) -> str:
-    if not supabase: return "ask"
-    res = supabase.table("luce_users").select("autonomy").eq("id", user_id).single().execute()
-    if res.data and res.data.get("autonomy") in AUTONOMY_LEVELS:
-        return res.data["autonomy"]
+    if not supabase:
+        return "ask"
+    try:
+        res = (
+            supabase.table("luce_users")
+            .select("autonomy")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data and res.data[0].get("autonomy") in AUTONOMY_LEVELS:
+            return res.data[0]["autonomy"]
+    except Exception as exc:
+        logger.error("get_autonomy failed (user=%s): %s", user_id, exc)
     return "ask"
 
 def set_autonomy(user_id: str, level: str):
@@ -122,7 +132,63 @@ def create_pending_action(user_id: str, tool: str, arguments: dict) -> str:
     except Exception as e:
         logger.error("❌ ÉCHEC CRITIQUE lors de la création de l'action en attente: %s", e)
         raise  # On ne cache plus l'erreur !
+def save_memory(user_id: str, fact: str, category: str = "other"):
+    """Enregistre un fait durable sur l'utilisateur (sans doublon exact)."""
+    if not supabase:
+        raise RuntimeError("Supabase non configuré")
 
+    fact = (fact or "").strip()
+    if not fact:
+        return
+
+    try:
+        existing = (
+            supabase.table("user_memories")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("fact", fact)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return
+
+        supabase.table("user_memories").insert(
+            {"user_id": user_id, "fact": fact, "category": category}
+        ).execute()
+    except Exception as exc:
+        logger.error("save_memory failed (user=%s): %s", user_id, exc)
+        raise
+
+
+def get_memories(user_id: str, limit: int = 40):
+    """Renvoie les souvenirs les plus récents, du plus ancien au plus récent."""
+    if not supabase:
+        return []
+    try:
+        res = (
+            supabase.table("user_memories")
+            .select("fact, category")
+            .eq("user_id", user_id)
+            .order("id", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(reversed(res.data)) if res.data else []
+    except Exception as exc:
+        logger.error("get_memories failed (user=%s): %s", user_id, exc)
+        return []
+
+
+def clear_memories(user_id: str):
+    """Efface toute la mémoire d'un utilisateur."""
+    if not supabase:
+        return
+    try:
+        supabase.table("user_memories").delete().eq("user_id", user_id).execute()
+    except Exception as exc:
+        logger.error("clear_memories failed (user=%s): %s", user_id, exc)
+        
 def _action_row(row: dict):
     return {
         "id": row["id"], "tool": row["tool"],
